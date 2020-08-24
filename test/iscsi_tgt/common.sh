@@ -2,7 +2,7 @@
 TARGET_INTERFACE="spdk_tgt_int"
 INITIATOR_INTERFACE="spdk_init_int"
 TARGET_NAMESPACE="spdk_iscsi_ns"
-TARGET_NS_CMD="ip netns exec $TARGET_NAMESPACE"
+TARGET_NS_CMD=(ip netns exec "$TARGET_NAMESPACE")
 
 # iSCSI target configuration
 TARGET_IP=10.0.0.1
@@ -12,15 +12,14 @@ NETMASK=$INITIATOR_IP/32
 INITIATOR_TAG=2
 INITIATOR_NAME=ANY
 PORTAL_TAG=1
-ISCSI_APP="$TARGET_NS_CMD ./app/iscsi_tgt/iscsi_tgt"
+ISCSI_APP=("${TARGET_NS_CMD[@]}" "${ISCSI_APP[@]}")
 ISCSI_TEST_CORE_MASK=0xFF
 
 function create_veth_interfaces() {
-	# $1 = test type (posix/vpp)
 	ip netns del $TARGET_NAMESPACE || true
 	ip link delete $INITIATOR_INTERFACE || true
 
-	trap "cleanup_veth_interfaces $1; exit 1" SIGINT SIGTERM EXIT
+	trap 'cleanup_veth_interfaces; exit 1' SIGINT SIGTERM EXIT
 
 	# Create veth (Virtual ethernet) interface pair
 	ip link add $INITIATOR_INTERFACE type veth peer name $TARGET_INTERFACE
@@ -34,9 +33,10 @@ function create_veth_interfaces() {
 	# Accept connections from veth interface
 	iptables -I INPUT 1 -i $INITIATOR_INTERFACE -p tcp --dport $ISCSI_PORT -j ACCEPT
 
-	$TARGET_NS_CMD ip link set lo up
-	$TARGET_NS_CMD ip addr add $TARGET_IP/24 dev $TARGET_INTERFACE
-	$TARGET_NS_CMD ip link set $TARGET_INTERFACE up
+	"${TARGET_NS_CMD[@]}" ip link set $TARGET_INTERFACE up
+
+	"${TARGET_NS_CMD[@]}" ip link set lo up
+	"${TARGET_NS_CMD[@]}" ip addr add $TARGET_IP/24 dev $TARGET_INTERFACE
 
 	# Verify connectivity
 	ping -c 1 $TARGET_IP
@@ -44,8 +44,6 @@ function create_veth_interfaces() {
 }
 
 function cleanup_veth_interfaces() {
-	# $1 = test type (posix/vpp)
-
 	# Cleanup veth interfaces and network namespace
 	# Note: removing one veth, removes the pair
 	ip link delete $INITIATOR_INTERFACE
@@ -53,25 +51,53 @@ function cleanup_veth_interfaces() {
 }
 
 function iscsitestinit() {
-	if [ "$1" == "iso" ]; then
+	if [ "$TEST_MODE" == "iso" ]; then
 		$rootdir/scripts/setup.sh
-		if [ ! -z "$2" ]; then
-			create_veth_interfaces $2
-		else
-			# default to posix
-			create_veth_interfaces "posix"
-		fi
+		create_veth_interfaces
 	fi
 }
 
-function iscsitestfini() {
-	if [ "$1" == "iso" ]; then
-		if [ ! -z "$2" ]; then
-			cleanup_veth_interfaces $2
+function waitforiscsidevices() {
+	local num=$1
+
+	for ((i = 1; i <= 20; i++)); do
+		n=$(iscsiadm -m session -P 3 | grep -c "Attached scsi disk sd[a-z]*" || true)
+		if [ $n -ne $num ]; then
+			sleep 0.1
 		else
-			# default to posix
-			cleanup_veth_interfaces "posix"
+			return 0
 		fi
+	done
+
+	return 1
+}
+
+function iscsitestfini() {
+	if [ "$TEST_MODE" == "iso" ]; then
+		cleanup_veth_interfaces
 		$rootdir/scripts/setup.sh reset
 	fi
+}
+
+function initiator_json_config() {
+	# Prepare config file for iSCSI initiator
+	jq . <<- JSON
+		{
+		  "subsystems": [
+		    {
+		      "subsystem": "bdev",
+		      "config": [
+		        {
+		          "method": "bdev_iscsi_create",
+		          "params": {
+		            "name": "iSCSI0",
+		            "url": "iscsi://$TARGET_IP/iqn.2016-06.io.spdk:disk1/0",
+		            "initiator_iqn": "iqn.2016-06.io.spdk:disk1/0"
+		          }
+		        }${*:+,$*}
+		      ]
+		    }
+		  ]
+		}
+	JSON
 }

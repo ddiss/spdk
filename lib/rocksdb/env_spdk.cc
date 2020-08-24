@@ -59,7 +59,7 @@ std::string g_bdev_name;
 volatile bool g_spdk_ready = false;
 volatile bool g_spdk_start_failure = false;
 
-static void SpdkInitializeThread(void);
+void SpdkInitializeThread(void);
 
 class SpdkThreadCtx
 {
@@ -85,6 +85,18 @@ private:
 };
 
 thread_local SpdkThreadCtx g_sync_args;
+
+static void
+set_channel()
+{
+	struct spdk_thread *thread;
+
+	if (g_fs != NULL && g_sync_args.channel == NULL) {
+		thread = spdk_thread_create("spdK_rocksdb", NULL);
+		spdk_set_thread(thread);
+		g_sync_args.channel = spdk_fs_alloc_thread_ctx(g_fs);
+	}
+}
 
 static void
 __call_fn(void *arg1, void *arg2)
@@ -151,6 +163,7 @@ public:
 
 SpdkSequentialFile::~SpdkSequentialFile(void)
 {
+	set_channel();
 	spdk_file_close(mFile, g_sync_args.channel);
 }
 
@@ -159,6 +172,7 @@ SpdkSequentialFile::Read(size_t n, Slice *result, char *scratch)
 {
 	int64_t ret;
 
+	set_channel();
 	ret = spdk_file_read(mFile, g_sync_args.channel, scratch, mOffset, n);
 	if (ret >= 0) {
 		mOffset += ret;
@@ -197,6 +211,7 @@ public:
 
 SpdkRandomAccessFile::~SpdkRandomAccessFile(void)
 {
+	set_channel();
 	spdk_file_close(mFile, g_sync_args.channel);
 }
 
@@ -205,6 +220,7 @@ SpdkRandomAccessFile::Read(uint64_t offset, size_t n, Slice *result, char *scrat
 {
 	int64_t rc;
 
+	set_channel();
 	rc = spdk_file_read(mFile, g_sync_args.channel, scratch, offset, n);
 	if (rc >= 0) {
 		*result = Slice(scratch, n);
@@ -246,6 +262,8 @@ public:
 	virtual Status Truncate(uint64_t size) override
 	{
 		int rc;
+
+		set_channel();
 		rc = spdk_file_truncate(mFile, g_sync_args.channel, size);
 		if (!rc) {
 			mSize = size;
@@ -257,6 +275,7 @@ public:
 	}
 	virtual Status Close() override
 	{
+		set_channel();
 		spdk_file_close(mFile, g_sync_args.channel);
 		mFile = NULL;
 		return Status::OK();
@@ -270,6 +289,7 @@ public:
 	{
 		int rc;
 
+		set_channel();
 		rc = spdk_file_sync(mFile, g_sync_args.channel);
 		if (!rc) {
 			return Status::OK();
@@ -282,6 +302,7 @@ public:
 	{
 		int rc;
 
+		set_channel();
 		rc = spdk_file_sync(mFile, g_sync_args.channel);
 		if (!rc) {
 			return Status::OK();
@@ -307,6 +328,7 @@ public:
 	{
 		int rc;
 
+		set_channel();
 		rc = spdk_file_truncate(mFile, g_sync_args.channel, offset + len);
 		if (!rc) {
 			return Status::OK();
@@ -324,6 +346,7 @@ public:
 		 * SPDK BlobFS does not have a range sync operation yet, so just sync
 		 *  the whole file.
 		 */
+		set_channel();
 		rc = spdk_file_sync(mFile, g_sync_args.channel);
 		if (!rc) {
 			return Status::OK();
@@ -350,6 +373,7 @@ SpdkWritableFile::Append(const Slice &data)
 {
 	int64_t rc;
 
+	set_channel();
 	rc = spdk_file_write(mFile, g_sync_args.channel, (void *)data.data(), mSize, data.size());
 	if (rc >= 0) {
 		mSize += data.size();
@@ -392,7 +416,7 @@ public:
 	virtual ~SpdkEnv();
 
 	virtual Status NewSequentialFile(const std::string &fname,
-					 unique_ptr<SequentialFile> *result,
+					 std::unique_ptr<SequentialFile> *result,
 					 const EnvOptions &options) override
 	{
 		if (fname.compare(0, mDirectory.length(), mDirectory) == 0) {
@@ -400,6 +424,7 @@ public:
 			int rc;
 
 			std::string name = sanitize_path(fname, mDirectory);
+			set_channel();
 			rc = spdk_fs_open_file(g_fs, g_sync_args.channel,
 					       name.c_str(), 0, &file);
 			if (rc == 0) {
@@ -419,7 +444,7 @@ public:
 	}
 
 	virtual Status NewRandomAccessFile(const std::string &fname,
-					   unique_ptr<RandomAccessFile> *result,
+					   std::unique_ptr<RandomAccessFile> *result,
 					   const EnvOptions &options) override
 	{
 		if (fname.compare(0, mDirectory.length(), mDirectory) == 0) {
@@ -427,6 +452,7 @@ public:
 			struct spdk_file *file;
 			int rc;
 
+			set_channel();
 			rc = spdk_fs_open_file(g_fs, g_sync_args.channel,
 					       name.c_str(), 0, &file);
 			if (rc == 0) {
@@ -442,7 +468,7 @@ public:
 	}
 
 	virtual Status NewWritableFile(const std::string &fname,
-				       unique_ptr<WritableFile> *result,
+				       std::unique_ptr<WritableFile> *result,
 				       const EnvOptions &options) override
 	{
 		if (fname.compare(0, mDirectory.length(), mDirectory) == 0) {
@@ -450,6 +476,7 @@ public:
 			struct spdk_file *file;
 			int rc;
 
+			set_channel();
 			rc = spdk_fs_open_file(g_fs, g_sync_args.channel, name.c_str(),
 					       SPDK_BLOBFS_OPEN_CREATE, &file);
 			if (rc == 0) {
@@ -466,14 +493,14 @@ public:
 
 	virtual Status ReuseWritableFile(const std::string &fname,
 					 const std::string &old_fname,
-					 unique_ptr<WritableFile> *result,
+					 std::unique_ptr<WritableFile> *result,
 					 const EnvOptions &options) override
 	{
 		return EnvWrapper::ReuseWritableFile(fname, old_fname, result, options);
 	}
 
 	virtual Status NewDirectory(__attribute__((unused)) const std::string &name,
-				    unique_ptr<Directory> *result) override
+				    std::unique_ptr<Directory> *result) override
 	{
 		result->reset(new SpdkDirectory());
 		return Status::OK();
@@ -484,6 +511,7 @@ public:
 		int rc;
 		std::string name = sanitize_path(fname, mDirectory);
 
+		set_channel();
 		rc = spdk_fs_file_stat(g_fs, g_sync_args.channel, name.c_str(), &stat);
 		if (rc == 0) {
 			return Status::OK();
@@ -496,6 +524,7 @@ public:
 		std::string src_name = sanitize_path(src, mDirectory);
 		std::string target_name = sanitize_path(t, mDirectory);
 
+		set_channel();
 		rc = spdk_fs_rename_file(g_fs, g_sync_args.channel,
 					 src_name.c_str(), target_name.c_str());
 		if (rc == -ENOENT) {
@@ -514,6 +543,7 @@ public:
 		int rc;
 		std::string name = sanitize_path(fname, mDirectory);
 
+		set_channel();
 		rc = spdk_fs_file_stat(g_fs, g_sync_args.channel, name.c_str(), &stat);
 		if (rc == -ENOENT) {
 			return EnvWrapper::GetFileSize(fname, size);
@@ -526,6 +556,7 @@ public:
 		int rc;
 		std::string name = sanitize_path(fname, mDirectory);
 
+		set_channel();
 		rc = spdk_fs_delete_file(g_fs, g_sync_args.channel, name.c_str());
 		if (rc == -ENOENT) {
 			return EnvWrapper::DeleteFile(fname);
@@ -537,6 +568,7 @@ public:
 		std::string name = sanitize_path(fname, mDirectory);
 		int64_t rc;
 
+		set_channel();
 		rc = spdk_fs_open_file(g_fs, g_sync_args.channel, name.c_str(),
 				       SPDK_BLOBFS_OPEN_CREATE, (struct spdk_file **)lock);
 		if (!rc) {
@@ -548,6 +580,7 @@ public:
 	}
 	virtual Status UnlockFile(FileLock *lock) override
 	{
+		set_channel();
 		spdk_file_close((struct spdk_file *)lock, g_sync_args.channel);
 		return Status::OK();
 	}
@@ -605,12 +638,14 @@ public:
  * SpdkInitializeThread function, so that the main thread can explicitly
  * call it after the filesystem has been loaded.
  */
-static void SpdkInitializeThread(void)
+void SpdkInitializeThread(void)
 {
 	struct spdk_thread *thread;
 
-	assert(g_sync_args.channel == NULL);
 	if (g_fs != NULL) {
+		if (g_sync_args.channel) {
+			spdk_fs_free_thread_ctx(g_sync_args.channel);
+		}
 		thread = spdk_thread_create("spdk_rocksdb", NULL);
 		spdk_set_thread(thread);
 		g_sync_args.channel = spdk_fs_alloc_thread_ctx(g_fs);
@@ -628,7 +663,7 @@ fs_load_cb(__attribute__((unused)) void *ctx,
 }
 
 static void
-spdk_rocksdb_run(__attribute__((unused)) void *arg1)
+rocksdb_run(__attribute__((unused)) void *arg1)
 {
 	struct spdk_bdev *bdev;
 
@@ -636,6 +671,7 @@ spdk_rocksdb_run(__attribute__((unused)) void *arg1)
 
 	if (bdev == NULL) {
 		SPDK_ERRLOG("bdev %s not found\n", g_bdev_name.c_str());
+		spdk_app_stop(0);
 		exit(1);
 	}
 
@@ -656,7 +692,7 @@ fs_unload_cb(__attribute__((unused)) void *ctx,
 }
 
 static void
-spdk_rocksdb_shutdown(void)
+rocksdb_shutdown(void)
 {
 	if (g_fs != NULL) {
 		spdk_fs_unload(g_fs, fs_unload_cb, NULL);
@@ -671,7 +707,7 @@ initialize_spdk(void *arg)
 	struct spdk_app_opts *opts = (struct spdk_app_opts *)arg;
 	int rc;
 
-	rc = spdk_app_start(opts, spdk_rocksdb_run, NULL);
+	rc = spdk_app_start(opts, rocksdb_run, NULL);
 	/*
 	 * TODO:  Revisit for case of internal failure of
 	 * spdk_app_start(), itself.  At this time, it's known
@@ -699,7 +735,7 @@ SpdkEnv::SpdkEnv(Env *base_env, const std::string &dir, const std::string &conf,
 	spdk_app_opts_init(opts);
 	opts->name = "rocksdb";
 	opts->config_file = mConfig.c_str();
-	opts->shutdown_cb = spdk_rocksdb_shutdown;
+	opts->shutdown_cb = rocksdb_shutdown;
 
 	spdk_fs_set_cache_size(cache_size_in_mb);
 	g_bdev_name = mBdev;
@@ -709,7 +745,7 @@ SpdkEnv::SpdkEnv(Env *base_env, const std::string &dir, const std::string &conf,
 		;
 	if (g_spdk_start_failure) {
 		delete opts;
-		throw SpdkAppStartException("spdk_app_start() unable to start spdk_rocksdb_run()");
+		throw SpdkAppStartException("spdk_app_start() unable to start rocksdb_run()");
 	}
 
 	SpdkInitializeThread();
