@@ -80,7 +80,7 @@ ifneq ($(filter powerpc%,$(TARGET_MACHINE)),)
 COMMON_CFLAGS += -mcpu=native
 endif
 ifeq ($(TARGET_MACHINE),x86_64)
-COMMON_CFLAGS += -march=core2
+COMMON_CFLAGS += -march=native
 endif
 ifeq ($(TARGET_MACHINE),aarch64)
 COMMON_CFLAGS += -march=armv8-a+crc
